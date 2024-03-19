@@ -1,0 +1,181 @@
+#!/bin/sh
+
+debug=0
+
+readonly savedFileDateTimeStr="%Y-%m-%d_%H-%M-%S"
+
+compinfo() {
+
+file1="$1"
+file2="$2"
+resultfile="$3"
+
+# read through comparison file and look for the same variable in existing nvram
+
+compcnt=$(wc -l $file1 | awk '{print $1}')
+
+echo "# Match -  Variables that are in both $realcomp and nvram" > $resultfile.match
+echo "# No-Match - Variables that are in $realcomp but not in nvram" > $resultfile.nomatch
+
+while IFS="" read -r line; do
+	if [ ! -z "$line" ]; then
+
+# keep existing comments and function info from comparison file
+
+		first_char=$(printf "%s" "$line" | cut -c1)
+		if [ "$first_char" = "[" ] || [ "$first_char" = "#" ]; then
+			printf "%s\\n" "$line" >> $resultfile.match
+		else
+
+# now find same/same - but filter out empty nvram variables
+
+			varis=$(echo "$line" | awk -F '=' '{print $1}')
+			nvline=$(grep -w $varis $file2)
+			if [ ! -z "$nvline" ]; then                                 
+				valis=$(echo "$nvline" | awk -F '=' '{print $2}')  # found a var, get value
+			fi
+if [ $debug = 1 ]; then
+			printf "Line: %s  Varis: %s  Valis: %s     NVline: %s\\n" "$line" "$varis" "$valis" "$nvline"
+fi
+			if [ ! -z "$nvline" ] && [ ! -z "$valis" ]; then         # valid var, valid value
+				printf "%s\\n" "$line" >> $resultfile.match                     # put in new match file
+				matchcnt=$((matchcnt+1))
+			elif [ ! -z "$valis" ]; then
+				printf "%s\\n" "$line" >> $resultfile.nomatch             # found nv var with value but not in comparison
+				nomatchcnt=$((nomatchcnt+1))
+			else
+				nullcnt=$((nullcnt+1))
+			fi
+		fi
+		
+#	compcnt=$((compcnt-1))
+#	printf "  %s \\r"  $compcnt
+	fi
+	compcnt=$((compcnt-1))
+	printf "  %s \\r"  $compcnt
+done < "$file1"
+}
+
+# find variables in nvram that are not in comparison file
+
+compout() {
+
+file1="$1"  # nvram file
+file2="$2"  # comparison file
+
+
+echo "# Missing - Variables that are in nvram but missing from $realcomp" > $resultfile.missing
+resultfile="$3".missing
+
+# read through nvram file and look for missing variables in existing comparison
+
+compcnt=$(wc -l $file1 | awk '{print $1}')
+
+while IFS="" read -r line; do
+	if [ ! -z "$line" ]; then
+
+# now find missing - but filter out empty nvram variables
+
+		varis=$(echo "$line" | awk -F '=' '{print $1}')
+		nvline=$(grep -w $varis $file2)
+		if [ -z "$nvline" ]; then                                 
+			valis=$(echo "$line" | awk -F '=' '{print $2}')  # nvram var not in comparison
+		fi
+if [ $debug = 1 ]; then
+			printf "Line: %s  Varis: %s  Valis: %s     NVline: %s\\n" "$line" "$varis" "$valis" "$nvline"
+fi
+		if [ -z "$nvline" ] && [ ! -z "$valis" ]; then         # not in but valid value
+			printf "%s\\n" "$line" >> $resultfile                     # put in new match file
+			missingcnt=$((missingcnt+1))
+		fi
+	fi
+	compcnt=$((compcnt-1))
+	printf "  %s \\r"  $compcnt
+done < "$file1"
+
+}
+
+
+cleanup() {
+
+	rm -f /tmp/nvnow.tmp
+	rm -f /tmp/nvcomp.tmp
+}
+
+# main
+
+# nvnow is a snapshot of the existing nvram
+# nvcomp is the dataset we are comparing it to
+
+if [ $# -ne 2 ]; then
+    printf "\\nfindem: error - 2 args expected:\\n"
+    printf "arg1 is nvram.ini file arg2 is the basename of where results should go\\n"
+    printf " i.e. findem nvram-merlin.ini resultsfile\\n"
+    printf " results are:\\n"
+    printf "           arg2.match - variables that match between arg1 and nvram\\n"
+    printf "           arg2.nomatch - variables from arg1 that aren't in nvram\\n"
+    printf "           arg2.missing - variables from nvram that are not in arg1\\n\\n"
+    exit
+fi
+
+nvnow=/tmp/nvnow.tmp
+nvcomp=/tmp/nvcomp.tmp
+
+# operate on a copy of the comparison
+
+trap "cleanup" EXIT HUP INT QUIT
+
+cp $1 /tmp/nvcomp.tmp
+realcomp="$1"
+
+/bin/nvram show > $nvnow 2>/dev/null
+
+#
+# remove known hardware/non-user variables
+# may need to increase 0 1 2 for different hardware..
+# my AX58U has 0: and 1: and AX88U Pro 0: 1: and 2: 
+#
+
+sed -i '/^0:/d' $nvnow
+sed -i '/^1:/d' $nvnow
+sed -i '/^2:/d' $nvnow
+
+printf "Cleaned up nv file\\n"
+
+#
+# clean up special chars etc in comparison files
+#
+
+sed -i '/^@/d' $nvcomp
+sed -i '/^+/d' $nvcomp
+
+printf "Cleaned up $1\\n"
+
+
+# clear out counters
+
+nullcnt=0
+matchcnt=0
+nomatchcnt=0
+missingcnt=0
+
+# add date time stamp to results files (ala Martinski)
+
+resultsfile="$2_$(date +"$savedFileDateTimeStr")"
+
+
+printf "Starting match search - going to take a while...\\n"
+
+compinfo "$nvcomp" "$nvnow" "$resultsfile"
+
+printf "\\nStarting missing search - going to take a while...\\n"
+
+compout "$nvnow" "$nvcomp" "$resultsfile"
+
+
+printf "Done!\\n"
+
+printf "%s matching variables %s unmatched %s missing and %s null variables detected\\n" $matchcnt $nomatchcnt $missingcnt $nullcnt
+#comm -23 --nocheck-order /tmp/basenv inem > notinem
+#comm -13 --nocheck-order /tmp/basenv $2 > kinda
+
